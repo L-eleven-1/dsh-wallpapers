@@ -1,0 +1,6 @@
+url: https://github.com/L-eleven-1/dsh-wallpapers
+name: L-eleven-1/dsh-wallpapers
+category: theme
+description:
+  en: Applies the Naihuangxin appearance preset through dsh-plugin-wallpaper-engine 1.4.0, with settings backup and restore.
+  zh: 通过原壁纸插件 1.4.0 为原生 DSH 页面应用“奶皇新”外观预设，提供设置备份与恢复。
