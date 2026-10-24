@@ -1,0 +1,10 @@
+node_modules/
+coverage/
+.DS_Store
+*.mp4
+*.webm
+*.mov
+*.log
+.env*
+local-settings.json
+test-results/
