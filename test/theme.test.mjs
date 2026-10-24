@@ -1,74 +1,100 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { resolve, join, sep } from 'node:path';
-import { DEFAULTS, sanitize, parseRange } from '../src/model.js';
-import { createHandlers, findWallpaper, apply } from '../src/host.js';
+import { runInNewContext } from 'node:vm';
+import { createPresetActions, restoreFields, BASE, ENGINE, FONTSET_ID } from '../src/model.js';
+import { createHandler, sanitizeBackup } from '../src/host.js';
+const preset = JSON.parse(await readFile(new URL('../presets/original-screenshot.json', import.meta.url), 'utf8'));
 
-test('ranges support seeking and reject invalid or multiple byte ranges', () => {
-  assert.deepEqual(parseRange('bytes=2-5', 10), { start: 2, end: 5 });
-  assert.deepEqual(parseRange('bytes=7-', 10), { start: 7, end: 9 });
-  assert.deepEqual(parseRange('bytes=-3', 10), { start: 7, end: 9 });
-  assert.deepEqual(parseRange('bytes=0-999', 10), { start: 0, end: 9 });
-  for (const header of ['bytes=-0', 'bytes=10-', 'bytes=4-2', 'bytes=0-1,4-5', 'bytes=9007199254740992-', 'nonsense']) assert.equal(parseRange(header, 10), false);
+function fixture({ missing = false, failOnce = false } = {}) {
+  let settings = { ...preset.settings, id: 'previous', blur: 7, glassAlpha: 62, otherSetting: 'keep' };
+  let active = 'default', preference = 'light', backup = null;
+  const calls = []; const fonts = new Map([['default', { name: '用户字体', values: { globalFamily: 'Keep Me' } }]]);
+  const theme = { getTheme: () => ({ preference }), setTheme(value) { preference = value; } };
+  async function request(path, method = 'GET', data) {
+    calls.push({ path, method, data: structuredClone(data) });
+    if (path === `${BASE}/preset`) return structuredClone(preset);
+    if (path === `${BASE}/state`) return { hasBackup: !!backup };
+    if (path === `${BASE}/backup`) {
+      if (method === 'PUT') { backup ??= structuredClone(data); return { ok: true }; }
+      if (method === 'DELETE') { backup = null; return { ok: true }; }
+      return { backup: structuredClone(backup) };
+    }
+    if (path === `${ENGINE}/inventory`) return { wallpapers: missing ? [] : [{ id: preset.workshopId }] };
+    if (path === `${ENGINE}/settings`) {
+      if (method === 'PUT') {
+        if (failOnce) { failOnce = false; throw new Error('Simulated write failure'); }
+        settings = { ...settings, ...structuredClone(data) };
+      }
+      return { settings: structuredClone(settings) };
+    }
+    if (path === `${ENGINE}/fontsets`) return { active };
+    if (path.endsWith('/activate')) { active = path.split('/').at(-2); return { ok: true }; }
+    if (method === 'PUT' && path.includes('/fontsets/')) { fonts.set(path.split('/').at(-1), structuredClone(data)); return { ok: true }; }
+    throw new Error('Unexpected request ' + path);
+  }
+  return { actions: createPresetActions({ request, theme }), calls, fonts,
+    read: () => ({ settings, active, preference, backup }), set(field, value) { settings[field] = value; } };
+}
+
+test('applies exact captured settings through original APIs and preserves user font document', async () => {
+  const f = fixture(); const oldFont = structuredClone(f.fonts.get('default'));
+  const result = await f.actions.apply();
+  assert.equal(result.needsRefresh, true);
+  const write = f.calls.find(c => c.path === ENGINE + '/settings' && c.method === 'PUT');
+  assert.deepEqual(write.data, preset.settings);
+  assert.deepEqual(f.fonts.get('default'), oldFont);
+  assert.equal(f.read().active, FONTSET_ID); assert.equal(f.read().preference, 'dark');
+  assert.equal(f.read().settings.otherSetting, 'keep');
+  const firstBackup = structuredClone(f.read().backup);
+  await f.actions.apply(); assert.deepEqual(f.read().backup, firstBackup);
 });
 
-test('settings clamp values, reject unknown fields and preserve omitted preferences', () => {
-  const result = sanitize({ backgroundOpacity: 999, panelOpacity: -2, radius: NaN, backgroundFile: 'a\0b', arbitrarySecret: 'ignored' }, { ...DEFAULTS, blur: 29 });
-  assert.equal(result.backgroundOpacity, 1); assert.equal(result.panelOpacity, .1);
-  assert.equal(result.radius, DEFAULTS.radius); assert.equal(result.blur, 29);
-  assert.equal(result.backgroundFile, ''); assert.equal('arbitrarySecret' in result, false);
+test('missing wallpaper causes no settings writes', async () => {
+  const f = fixture({ missing: true }); await assert.rejects(f.actions.apply(), /尚未下载/);
+  assert.equal(f.calls.filter(c => c.method !== 'GET').length, 0);
 });
 
-test('media is discovered from Steam libraries and rejects paths outside its workshop directory', async t => {
-  const parent = resolve('test-results'); await mkdir(parent, { recursive: true });
-  const directory = await mkdtemp(join(parent, 'discovery-'));
-  t.after(async () => { assert.ok(directory.startsWith(parent + sep)); await rm(directory, { recursive: true, force: true }); });
-  const folder = join(directory, 'steamapps/workshop/content/431960/3808236079');
-  await mkdir(folder, { recursive: true });
-  await writeFile(join(folder, 'project.json'), JSON.stringify({ type: 'video', file: 'clip.mp4' }));
-  await writeFile(join(folder, 'clip.mp4'), Buffer.from('0123456789'));
-  const media = await findWallpaper({ backgroundFile: '' }, { STEAM_PATH: directory });
-  assert.equal(media.path, join(folder, 'clip.mp4'));
-  await writeFile(join(directory, 'outside.mp4'), 'secret');
-  await writeFile(join(folder, 'project.json'), JSON.stringify({ type: 'video', file: '../../../../../../outside.mp4' }));
-  assert.equal(await findWallpaper({ backgroundFile: '' }, { STEAM_PATH: directory }), null);
+test('failed apply rolls settings, font selection and theme back', async () => {
+  const f = fixture({ failOnce: true }); const before = structuredClone(f.read());
+  await assert.rejects(f.actions.apply(), /已恢复/);
+  assert.deepEqual(f.read().settings, before.settings);
+  assert.equal(f.read().active, before.active); assert.equal(f.read().preference, before.preference);
+  assert.ok(f.read().backup);
 });
 
-test('HTTP routes serve seeking, HEAD and missing files; untrusted writes are refused', async t => {
-  const parent = resolve('test-results'); await mkdir(parent, { recursive: true });
-  const directory = await mkdtemp(join(parent, 'http-'));
-  t.after(async () => { assert.ok(directory.startsWith(parent + sep)); await rm(directory, { recursive: true, force: true }); });
-  const file = join(directory, 'clip.mp4'); await writeFile(file, '0123456789');
-  const { stat } = await import('node:fs/promises'); const info = await stat(file);
-  let settings = { ...DEFAULTS }, missing = false;
-  const handlers = createHandlers({ getSettings: () => settings,
-    saveSettings: async patch => settings = sanitize(patch, settings),
-    locate: async () => missing ? null : { path: file, info } });
-  const server = createServer((req, res) => {
-    const key = req.url.split('/').at(-1); void handlers[key]?.(req, res);
-  });
+test('restore returns baseline while preserving later manual changes', async () => {
+  const f = fixture(); await f.actions.apply(); f.set('blur', 38);
+  await f.actions.restore();
+  assert.equal(f.read().settings.blur, 38); assert.equal(f.read().settings.glassAlpha, 62);
+  assert.equal(f.read().settings.id, 'previous'); assert.equal(f.read().active, 'default');
+  assert.equal(f.read().preference, 'light'); assert.equal(f.read().backup, null);
+  assert.deepEqual(restoreFields({ a: 9, b: 2 }, { a: 0, b: 0 }, { a: 1, b: 2 }), { b: 0 });
+});
+
+test('backup keeps only theme fields, validates identifiers, and rejects cross-site writes', async t => {
+  const value = { settings: { id: 'before', password: 'do not keep' }, fontSetId: 'default', themePreference: 'system' };
+  assert.equal('password' in sanitizeBackup(value, preset).settings, false);
+  assert.throws(() => sanitizeBackup({ ...value, fontSetId: '../escape' }, preset));
+  let backup = null;
+  const handler = createHandler({ preset, readBackup: async () => backup, createBackup: async data => { backup ??= data; }, clearBackup: async () => { backup = null; } });
+  const server = createServer((req, res) => void handler(req, res));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const partial = await fetch(origin + '/wallpaper', { headers: { Range: 'bytes=2-5' } });
-  assert.equal(partial.status, 206); assert.equal(await partial.text(), '2345');
-  const head = await fetch(origin + '/wallpaper', { method: 'HEAD' });
-  assert.equal(head.headers.get('content-length'), '10'); assert.equal(await head.text(), '');
-  assert.equal((await fetch(origin + '/wallpaper', { headers: { Range: 'bytes=90-' } })).status, 416);
-  const blocked = await fetch(origin + '/settings', { method: 'PUT', headers: { Origin: 'https://untrusted.invalid' }, body: '{"enabled":false}' });
-  assert.equal(blocked.status, 403); assert.equal(settings.enabled, true);
-  const saved = await fetch(origin + '/settings', { method: 'PUT', headers: { Origin: origin }, body: '{"enabled":false}' });
-  assert.equal(saved.status, 200); assert.equal(settings.enabled, false);
-  const relativePath = await fetch(origin + '/settings', { method: 'PUT', headers: { Origin: origin }, body: '{"backgroundFile":"relative.mp4"}' });
-  assert.equal(relativePath.status, 400);
-  missing = true; assert.equal((await fetch(origin + '/wallpaper')).status, 404);
+  assert.equal((await fetch(origin + BASE + '/backup', { method: 'PUT', headers: { Origin: 'https://other.invalid' }, body: JSON.stringify(value) })).status, 403);
+  const saved = await fetch(origin + BASE + '/backup', { method: 'PUT', headers: { Origin: origin }, body: JSON.stringify(value) });
+  assert.equal(saved.status, 200); assert.equal(backup.settings.id, 'before');
 });
 
-test('host unload unregisters both routes without changing desktop or wallpaper-engine settings', () => {
-  const paths = [], removed = []; let cleanup;
-  apply({ logger: { warn() {} }, webServer: { register(spec) { paths.push(spec.path); return () => removed.push(spec.path); } }, effect(setup) { cleanup = setup(); } });
-  assert.deepEqual(paths, ['/plugins/dsh-amber-glass-theme/settings', '/plugins/dsh-amber-glass-theme/wallpaper']);
-  cleanup(); assert.deepEqual(removed, paths);
+test('client mounts only a native settings section and cleans up the approximated v0.1 theme', async () => {
+  const client = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
+  let exports, removed = false; const sections = [];
+  const window = { [Symbol.for('dsh-amber-glass-theme:controller')]: { dispose() { removed = true; } },
+    __ModuleLoader__: { load(spec) { exports = spec.factory(() => ({})); } } };
+  runInNewContext(client, { window, Symbol, fetch() { throw new Error('No implicit requests'); } });
+  exports.apply({ get: () => ({}), slots: { inject(slot, fn) { fn(); }, register(spec) { sections.push(spec); } } });
+  assert.equal(removed, true); assert.equal(sections.length, 1); assert.equal(sections[0].name, 'settings.section');
+  assert.equal(window[Symbol.for('dsh-amber-glass-theme:controller')], undefined);
 });

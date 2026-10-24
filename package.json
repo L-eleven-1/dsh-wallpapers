@@ -1,19 +1,20 @@
 {
   "name": "dsh-amber-glass-theme",
-  "version": "0.1.0",
-  "description": "琥珀玻璃：DSH 本地动态背景、侧栏和面板主题。",
+  "version": "0.2.0",
+  "description": "用户原图预设：通过原壁纸插件还原奶皇新与原生 DSH 框体样式。",
   "type": "module",
   "main": "./src/host.js",
   "exports": {".": "./src/host.js", "./client": "./lib/client.js", "./package.json": "./package.json"},
-  "files": ["src", "lib", "presets", "docs", "cordis.patch.yml", "README.md", "LICENSE"],
+  "files": ["src", "lib", "presets", "cordis.patch.yml", "README.md", "LICENSE"],
   "engines": {"node": ">=22.12.0", "dsh": "^0.2.0-rc.1"},
   "repository": {"type": "git", "url": "git+https://github.com/L-eleven-1/dsh-wallpapers.git"},
   "license": "MIT",
   "author": "L-eleven-1",
   "keywords": ["dsh", "dsh-plugin", "theme", "glass", "wallpaper"],
+  "peerDependencies": {"dsh-plugin-wallpaper-engine": "1.4.0"},
   "scripts": {"build": "node scripts/build.mjs", "test": "node --test test/*.test.mjs", "prepack": "npm run build"},
   "dsh": {
     "bundle": {"patch": "./cordis.patch.yml"},
-    "client": {"platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-settings"]}
+    "client": {"platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-theme"]}
   }
 }
