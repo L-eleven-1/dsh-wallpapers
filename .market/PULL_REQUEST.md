@@ -10,7 +10,7 @@ This preset extension uses dsh-plugin-wallpaper-engine 1.4.0 to apply a captured
 - Runtime dependency: dsh-plugin-wallpaper-engine 1.4.0 (peer dependency)
 - `dsh.bundle` and `cordis.patch.yml` are included.
 - Six Node.js tests pass; isolated browser verification leaves native sidebar/composer geometry, style count and video count unchanged.
-- The plugin repository declares its user-provided reference screenshot in `screenshots.json`.
+- The plugin repository declares a freshly captured native DSH Web preview in `screenshots.json`; personal session rows were hidden in the temporary capture page.
 - No third-party wallpaper video or renderer code is redistributed.
 
 Only this plugin's YAML entry is added. Generated READMEs and other entries are unchanged.
